@@ -1,0 +1,8 @@
+[package]
+name = "ec2-client"
+version = "0.1.0"
+edition = "2024"
+authors = ["Neel Shah <neelshahx@gmail.com>"]
+
+[dependencies]
+rusoto_ec2="0.48.0"
