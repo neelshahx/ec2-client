@@ -5,4 +5,9 @@ edition = "2024"
 authors = ["Neel Shah <neelshahx@gmail.com>"]
 
 [dependencies]
-rusoto_ec2="0.48.0"
+rusoto_core = "0.48.0"
+rusoto_credential = "0.48.0"
+rusoto_signature = "0.48.0"
+rusoto_ec2 = "0.48.0"
+ssh2 = "0.9"
+tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "macros"] }
