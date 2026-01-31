@@ -9,8 +9,15 @@ async fn main() {
     b.add_set(
         "server",
         1,
-        MachineSetup::new("t3.small", "ami-0014ce3e52359afbd", |ssh| {
-            // ssh.exec("sudo yum install htop")
+        MachineSetup::new("t3.small", "ami-0014ce3e52359afbd", |sess| {
+            use std::io::Read;
+            let mut channel = sess.channel_session()?;
+            channel.exec("cat /etc/hostname")?;
+            let mut s = String::new();
+            channel.read_to_string(&mut s)?;
+            println!("{}", s);
+            channel.wait_close()?;
+            println!("{}", channel.exit_status()?);
             Ok(())
         }),
     );

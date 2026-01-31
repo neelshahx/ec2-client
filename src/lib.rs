@@ -3,20 +3,18 @@ extern crate rusoto_core;
 extern crate rusoto_credential;
 extern crate rusoto_ec2;
 extern crate rusoto_signature;
-extern crate ssh2;
 
 use rusoto_ec2::Ec2;
-use ssh2::Session;
 use std::collections::HashMap;
 use std::io;
-use std::io::Read;
-use std::net::TcpStream;
 
 // weird that this has no data
 pub struct SshConnection;
 
+mod ssh; // ties stream and session together
+
 pub struct Machine {
-    ssh: Option<SshConnection>,
+    ssh: Option<ssh::Session>,
     instance_type: String,
     private_ip: String, // internal
     public_dns: String, // external
@@ -25,16 +23,16 @@ pub struct Machine {
 pub struct MachineSetup {
     instance_type: String,
     ami: String,
-    setup: Box<dyn Fn(&mut SshConnection) -> io::Result<()>>, // short running function to run
-                                                              // on startup, F is Box<dyn Fn>
-                                                              // because func. can vary per machine
+    setup: Box<dyn Fn(&mut ssh::Session) -> io::Result<()>>, // short running function to run
+                                                             // on startup, F is Box<dyn Fn>
+                                                             // because func. can vary per machine
 }
 
 impl MachineSetup {
     pub fn new<F>(instance_type: &str, ami: &str, setup: F) -> Self
     where
-        F: Fn(&mut SshConnection) -> io::Result<()> + 'static, // static b/c dont want fn to borrow
-                                                               // objects with shorter lives
+        F: Fn(&mut ssh::Session) -> io::Result<()> + 'static, // static b/c dont want fn to borrow
+                                                              // objects with shorter lives
     {
         MachineSetup {
             instance_type: instance_type.to_string(),
@@ -46,7 +44,7 @@ impl MachineSetup {
 
 pub struct BurstBuilder {
     descriptors: HashMap<String, (u32, MachineSetup)>, // u32 is num instances to launch
-    max_duration: i64, // duration in minutes
+    max_duration: i64,                                 // duration in minutes
 }
 
 impl Default for BurstBuilder {
@@ -68,20 +66,26 @@ impl BurstBuilder {
         self.max_duration = hours * 60;
     }
 
-    pub async fn run<F>(self, f: F) // uses async
+    pub async fn run<F>(self, f: F)
+    // uses async
     where
         F: FnOnce(HashMap<String, &mut [Machine]>) -> io::Result<()>,
     {
         // make ec2 client
         let ec2 = rusoto_ec2::Ec2Client::new(rusoto_signature::Region::EuNorth1);
 
+        let mut setup_fns = HashMap::new();
+
         // 1. issue spot requests
+        let mut id_to_name = HashMap::new();
         let mut spot_req_ids = Vec::new();
-        for (name, (number, setup)) in self.descriptors { // name -> num instancs, machine setup
+        for (name, (number, setup)) in self.descriptors {
+            // name -> num instancs, machine setup
             // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_RequestSpotLaunchSpecification.html
             let mut launch = rusoto_ec2::RequestSpotLaunchSpecification::default();
             launch.image_id = Some(setup.ami);
             launch.instance_type = Some(setup.instance_type);
+            setup_fns.insert(name.clone(), setup.setup); // track closure for named group
 
             // static auth data
             launch.security_groups = Some(vec!["rust_ec2_client".to_string()]);
@@ -98,7 +102,11 @@ impl BurstBuilder {
 
             spot_req_ids.extend(
                 res.into_iter()
-                    .filter_map(|sir| sir.spot_instance_request_id),
+                    .filter_map(|sir| sir.spot_instance_request_id)
+                    .map(|sir| {
+                        id_to_name.insert(sir.clone(), name.clone());
+                        sir
+                    }),
             );
         }
 
@@ -118,12 +126,19 @@ impl BurstBuilder {
                 .unwrap()
                 .iter()
                 .any(|sir| sir.state.as_ref().unwrap() == "open");
-            if !any_open { //= some fulfilled, or closed or cancelled
+            if !any_open {
+                //= some fulfilled, or closed or cancelled
                 instances = res
                     .spot_instance_requests
                     .unwrap()
                     .into_iter()
-                    .filter_map(|sir| sir.instance_id)
+                    .filter_map(|sir| {
+                        let name = id_to_name
+                            .remove(&sir.spot_instance_request_id.unwrap())
+                            .unwrap();
+                        id_to_name.insert(sir.instance_id.as_ref().unwrap().clone(), name);
+                        sir.instance_id
+                    })
                     .collect();
                 break;
             }
@@ -136,7 +151,7 @@ impl BurstBuilder {
         ec2.cancel_spot_instance_requests(cancel).await.unwrap();
 
         // 4. wait until all instances are up and setups have been run
-        let mut machines = Vec::new(); // ec2 provides private/public dns
+        let mut machines = HashMap::new(); // ec2 provides private/public dns
         // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInstances.html
         let mut desc_req = rusoto_ec2::DescribeInstancesRequest::default();
         desc_req.instance_ids = Some(instances);
@@ -155,6 +170,7 @@ impl BurstBuilder {
                 for instance in reservation.instances.unwrap() {
                     match instance {
                         rusoto_ec2::Instance {
+                            instance_id: Some(instance_id),
                             instance_type: Some(instance_type),
                             private_ip_address: Some(private_ip),
                             public_dns_name: Some(public_dns),
@@ -166,7 +182,11 @@ impl BurstBuilder {
                                 private_ip,
                                 public_dns,
                             };
-                            machines.push(machine);
+                            let name = &id_to_name[&instance_id];
+                            machines
+                                .entry(name.clone())
+                                .or_insert_with(Vec::new)
+                                .push(machine);
                         }
                         _ => {
                             all_ready = false;
@@ -177,33 +197,13 @@ impl BurstBuilder {
         }
 
         //   - once an instance is ready, run to setup closure
-        for machine in &machines {
-            let tcp = loop {
-                match TcpStream::connect(&format!("{}:22", machine.public_dns)) {
-                    Ok(tcp) => break tcp,
-                    Err(_) => continue,
-                }
-            };
-            let mut sess = Session::new().unwrap();
-            sess.set_tcp_stream(tcp);
-            sess.handshake().unwrap();
-
-            // sess.userauth_agent("ubuntu").unwrap(); // flaky
-            sess.userauth_pubkey_file(
-                "ubuntu",
-                None,
-                std::path::Path::new("/home/neel/.ssh/rust_ec2_client.pem"),
-                None,
-            ).unwrap();
-            assert!(sess.authenticated());
-
-            let mut channel = sess.channel_session().unwrap();
-            channel.exec("cat /etc/hostname").unwrap();
-            let mut s = String::new();
-            channel.read_to_string(&mut s).unwrap();
-            println!("{}", s);
-            channel.wait_close().unwrap();
-            println!("{}", channel.exit_status().unwrap());
+        for (name, machines) in &mut machines {
+            let f = &setup_fns[name];
+            for machine in machines {
+                let mut sess =
+                    ssh::Session::connect(&format!("{}:22", machine.public_dns)).unwrap();
+                f(&mut sess).unwrap();
+            }
         }
 
         // 5. invoke F closure with Machine dscriptors
@@ -212,6 +212,14 @@ impl BurstBuilder {
         // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_TerminateInstances.html
         let mut termination_req = rusoto_ec2::TerminateInstancesRequest::default();
         termination_req.instance_ids = desc_req.instance_ids.unwrap();
-        ec2.terminate_instances(termination_req).await.unwrap();
+        // hack of ec2.terminate_instances(termination_req).await.unwrap();
+        while let Err(e) = ec2.terminate_instances(termination_req.clone()).await {
+            let msg = format!("{}", e);
+            if msg.contains("Pooled stream disconnected") || msg.contains("broken pipe") {
+                continue;
+            } else {
+                panic!("{}", msg);
+            }
+        }
     }
 }
