@@ -14,10 +14,10 @@ pub struct SshConnection;
 mod ssh; // ties stream and session together
 
 pub struct Machine {
-    ssh: Option<ssh::Session>,
-    instance_type: String,
-    private_ip: String, // internal
-    public_dns: String, // external
+    pub ssh: Option<ssh::Session>,
+    pub instance_type: String,
+    pub private_ip: String, // internal
+    pub public_dns: String, // external
 }
 
 pub struct MachineSetup {
@@ -69,7 +69,7 @@ impl BurstBuilder {
     pub async fn run<F>(self, f: F)
     // uses async
     where
-        F: FnOnce(HashMap<String, &mut [Machine]>) -> io::Result<()>,
+        F: FnOnce(HashMap<String, Vec<Machine>>) -> io::Result<()>,
     {
         // make ec2 client
         let ec2 = rusoto_ec2::Ec2Client::new(rusoto_signature::Region::EuNorth1);
@@ -175,7 +175,7 @@ impl BurstBuilder {
                             private_ip_address: Some(private_ip),
                             public_dns_name: Some(public_dns),
                             ..
-                        } => {
+                        } if !public_dns.is_empty() => {
                             let machine = Machine {
                                 ssh: None,
                                 instance_type,
@@ -196,17 +196,23 @@ impl BurstBuilder {
             }
         }
 
-        //   - once an instance is ready, run to setup closure
+        // once an instance is ready, run setup closure
         for (name, machines) in &mut machines {
             let f = &setup_fns[name];
             for machine in machines {
-                let mut sess =
-                    ssh::Session::connect(&format!("{}:22", machine.public_dns)).unwrap();
+                let mut sess = loop {
+                    match ssh::Session::connect(&format!("{}:22", machine.public_dns)) {
+                        Ok(sess) => break sess,
+                        Err(_) => continue,
+                    }
+                };
                 f(&mut sess).unwrap();
+                machine.ssh = Some(sess); // give ssh session to machine
             }
         }
 
-        // 5. invoke F closure with Machine dscriptors
+        // 5. invoke F closure with Machine descriptors
+        f(machines).unwrap();
 
         // 6. terminate all instances
         // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_TerminateInstances.html

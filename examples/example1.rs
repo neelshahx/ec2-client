@@ -10,31 +10,20 @@ async fn main() {
         "server",
         1,
         MachineSetup::new("t3.small", "ami-0014ce3e52359afbd", |sess| {
-            use std::io::Read;
-            let mut channel = sess.channel_session()?;
-            channel.exec("cat /etc/hostname")?;
-            let mut s = String::new();
-            channel.read_to_string(&mut s)?;
-            println!("{}", s);
-            channel.wait_close()?;
-            println!("{}", channel.exit_status()?);
-            Ok(())
+            sess.command("cat /etc/hostname").map(|out| println!("{}", out))
         }),
     );
     b.add_set(
         "client",
         2,
-        MachineSetup::new("t3.small", "ami-0014ce3e52359afbd", |ssh| {
-            // ssh.exec("sudo yum install htop")
-            Ok(())
+        MachineSetup::new("t3.small", "ami-0014ce3e52359afbd", |sess| {
+            sess.command("date").map(|out| println!("{}", out))
         }),
     );
-    b.run(|vms: HashMap<String, &mut [Machine]>| {
-        // let server_ip = vms["server"][0].ip;
-        // let cmd = format!("ping {}", server_ip);
-        // vms["client"].for_each_parallel(|client| {
-        //     client.exec(cmd);
-        // })
+    b.run(|vms: HashMap<String, Vec<Machine>>| {
+        println!("{}", vms["server"][0].private_ip);
+        println!("{}", vms["client"][0].private_ip);
+        println!("{}", vms["client"][1].private_ip);
         Ok(())
     }).await;
 }

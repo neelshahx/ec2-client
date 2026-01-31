@@ -20,6 +20,16 @@ impl Session {
         .unwrap();
         Ok(Session { ssh: sess })
     }
+
+    pub fn command(&self, cmd :&str) -> std::io::Result<String> {
+        use std::io::Read;
+        let mut channel = self.ssh.channel_session()?;
+        channel.exec(cmd)?;
+        let mut s = String::new();
+        channel.read_to_string(&mut s)?;
+        channel.wait_close()?;
+        Ok(s)
+    }
 }
 
 use std::ops::{Deref, DerefMut};
@@ -30,6 +40,7 @@ impl Deref for Session {
         &self.ssh
     }
 }
+
 impl DerefMut for Session {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.ssh
