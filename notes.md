@@ -34,7 +34,7 @@ ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-20231207
 - Debian: admin
 - CentOS: centos
 
-# verify ssh connectivity on remove instance
+### verify ssh connectivity on remove instance
 
 aws ec2 describe-instances --region eu-north-1 \
 --filters "Name=instance-state-name,Values=running" \
