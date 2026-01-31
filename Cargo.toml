@@ -11,4 +11,7 @@ rusoto_signature = "0.48.0"
 rusoto_ec2 = "0.48.0"
 ssh2 = "0.9"
 tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "macros"] }
-scopeguard = "1.2"
+# scopeguard = "1.2" - too complicated to put in with async, impl Drop instead
+
+# [profile.release]
+# debug = true - adds debug symbols

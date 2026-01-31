@@ -120,14 +120,13 @@ impl BurstBuilder {
                 Ok(res) => res,
                 Err(_) => continue,
             };
-            let any_open = res
+            let all_active = res
                 .spot_instance_requests
                 .as_ref()
                 .unwrap()
                 .iter()
-                .any(|sir| sir.state.as_ref().unwrap() == "open");
-            if !any_open {
-                //= some fulfilled, or closed or cancelled
+                .all(|sir| sir.state.as_ref().unwrap() == "active");
+            if all_active {
                 instances = res
                     .spot_instance_requests
                     .unwrap()
